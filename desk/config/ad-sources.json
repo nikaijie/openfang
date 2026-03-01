@@ -1,0 +1,126 @@
+{
+  "version": "0.2.0",
+  "timezone": "UTC",
+  "target_date_mode": "yesterday",
+  "storage": {
+    "raw_dir": "desk/data/raw",
+    "normalized_dir": "desk/data/normalized",
+    "logs_dir": "desk/data/logs"
+  },
+  "sources": [
+    {
+      "name": "internal_ads_portal_main",
+      "type": "internal_ads_portal",
+      "enabled": true,
+      "fetch_mode": "web_portal",
+      "currency": "USD",
+      "account_id": "main-account",
+      "auth": {
+        "username": "nikaijie@algorix.co",
+        "password": "s06091518.",
+        "username_env": "DESK_PORTAL_USERNAME",
+        "password_env": "DESK_PORTAL_PASSWORD",
+        "session_cookie_env": "DESK_PORTAL_SESSION_COOKIE",
+        "session_cookie": "6qVDl6ED=eyJzZXNzaW9uX2lkIjoiNzY3NDZmNmUtNmY0Mi00MmQwLTk4MzYtMmRiNzA0YzA1Yjc1IiwidXNlcl9pZCI6MTAwNDEsInRudF9pZCI6MTM3NCwiX2V4cGlyZSI6MTc3MjM5ODcyMDkyMSwiX21heEFnZSI6NjQ4MDAwMDB9"
+      },
+      "portal": {
+        "base_url": "http://newrixdemo.console.rixbeedesk.com",
+        "login_url": "http://newrixdemo.console.rixbeedesk.com/user/login",
+        "report_url_template": "http://newrixdemo.console.rixbeedesk.com/dashboard/over-adv",
+        "export_url_template": "",
+        "preferred_endpoint": "/api/dashboard/getOverview",
+        "api_endpoints": [
+          "/api/dashboard/getOverview",
+          "/api/dashboard/getTopCampaign",
+          "/api/dashboard/getDynamicMetric",
+          "/api/dashboard/getTopGroup",
+          "/api/dashboard/getTopCreative",
+          "/api/dashboard/getHalfMonthConsume"
+        ],
+        "selectors": {
+          "username_input": "#username",
+          "password_input": "#password",
+          "login_button": "button[type='submit']",
+          "table_ready_hint": "Campaign"
+        },
+        "headers": {
+          "x_currency": "USD",
+          "x_language": "zh-CN",
+          "x_page_uid": "10041",
+          "x_time_zone": "Etc/UTC",
+          "x_version": "310c1127f7fa96973af505dc56814c6c6a0f870b",
+          "x_sign": ""
+        },
+        "header_env": {
+          "x_version_env": "DESK_PORTAL_X_VERSION",
+          "x_page_uid_env": "DESK_PORTAL_X_PAGE_UID",
+          "x_sign_env": "DESK_PORTAL_X_SIGN",
+          "x_currency_env": "DESK_PORTAL_X_CURRENCY",
+          "x_language_env": "DESK_PORTAL_X_LANGUAGE",
+          "x_time_zone_env": "DESK_PORTAL_X_TIME_ZONE"
+        }
+      },
+      "mapping": {
+        "date": "date",
+        "source": "internal_ads_portal_main",
+        "account_id": "account_id",
+        "campaign_id": "campaign_id",
+        "spend": "spend",
+        "impressions": "impressions",
+        "clicks": "clicks",
+        "conversions": "conversions",
+        "revenue": "revenue"
+      }
+    },
+    {
+      "name": "internal_ads_portal_backup",
+      "type": "internal_ads_portal",
+      "enabled": false,
+      "fetch_mode": "api",
+      "currency": "USD",
+      "account_id": "backup-account",
+      "auth": {
+        "token_env": "DESK_PORTAL_API_TOKEN"
+      },
+      "api": {
+        "base_url": "https://ads-internal.example.com/api",
+        "path_template": "/v1/reports/performance?date={date}&level=campaign"
+      },
+      "mapping": {
+        "date": "date",
+        "source": "internal_ads_portal_backup",
+        "account_id": "account_id",
+        "campaign_id": "campaign_id",
+        "spend": "spend",
+        "impressions": "impressions",
+        "clicks": "clicks",
+        "conversions": "conversions",
+        "revenue": "revenue"
+      }
+    }
+  ],
+  "normalized_schema": {
+    "required_fields": [
+      "date",
+      "source",
+      "account_id",
+      "campaign_id",
+      "spend",
+      "impressions",
+      "clicks",
+      "conversions",
+      "revenue"
+    ],
+    "number_defaults": {
+      "spend": 0,
+      "impressions": 0,
+      "clicks": 0,
+      "conversions": 0,
+      "revenue": null
+    }
+  },
+  "retry": {
+    "max_attempts": 3,
+    "backoff_seconds": 5
+  }
+}
