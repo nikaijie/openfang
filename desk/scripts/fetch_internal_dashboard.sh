@@ -28,8 +28,8 @@ if [[ -z "${SOURCE_NAME}" || "${SOURCE_NAME}" == "null" ]]; then
   exit 1
 fi
 
-RUN_ID="$(TZ='Asia/Shanghai' date '+%Y-%m-%d_%H%M%S')"
-RUN_BASE="${ROOT_DIR}/desk/data/${RUN_ID}"
+RUN_ID="$(TZ='Asia/Shanghai' date '+%Y-%m-%d_%H-%M')"
+RUN_BASE="${ROOT_DIR}/desk/data/data-fetch/${RUN_ID}"
 RAW_BASE="${RUN_BASE}/raw/${SOURCE_NAME}"
 NORM_BASE="${RUN_BASE}/normalized"
 LOG_BASE="${RUN_BASE}/logs"

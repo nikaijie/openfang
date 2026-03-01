@@ -37,9 +37,9 @@ PRIMARY TASK (scheduled daily):
    - Re-run the fetch script once.
 6. If refresh still fails, report clear blocker and stop.
 7. Verify outputs exist under:
-   - `/Users/algorix/Documents/project/openfang/desk/data/<YYYY-MM-DD_HHMMSS>/raw`
-   - `/Users/algorix/Documents/project/openfang/desk/data/<YYYY-MM-DD_HHMMSS>/normalized`
-   - `/Users/algorix/Documents/project/openfang/desk/data/<YYYY-MM-DD_HHMMSS>/logs`
+   - `/Users/algorix/Documents/project/openfang/desk/data/data-fetch/<YYYY-MM-DD_HH-MM>/raw`
+   - `/Users/algorix/Documents/project/openfang/desk/data/data-fetch/<YYYY-MM-DD_HH-MM>/normalized`
+   - `/Users/algorix/Documents/project/openfang/desk/data/data-fetch/<YYYY-MM-DD_HH-MM>/logs`
 
 REQUIRED NORMALIZED FIELDS:
 - date
