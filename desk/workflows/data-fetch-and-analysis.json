@@ -1,0 +1,24 @@
+{
+  "name": "desk-data-fetch-and-analysis",
+  "description": "Run daily data fetch first, then generate daily analysis report and optimization actions.",
+  "steps": [
+    {
+      "name": "fetch-data",
+      "agent_name": "data-fetch-agent",
+      "prompt": "Execute daily data fetch for yesterday (UTC). Use the configured fetch script and return output paths + row count.",
+      "mode": "sequential",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "fetch_output"
+    },
+    {
+      "name": "analyze-data",
+      "agent_name": "analysis-report-agent",
+      "prompt": "Using latest normalized data produced by fetch step, generate daily report and actions JSON. Context from fetch step:\\n\\n{{fetch_output}}",
+      "mode": "sequential",
+      "timeout_secs": 300,
+      "error_mode": "fail",
+      "output_var": "analysis_output"
+    }
+  ]
+}

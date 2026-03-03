@@ -1,0 +1,51 @@
+{
+  "version": "0.2.0",
+  "timezone": "Asia/Shanghai",
+  "target_date_mode": "yesterday_and_last_week",
+  "retry": {
+    "max_attempts": 3,
+    "backoff_seconds": 2
+  },
+  "sources": [
+    {
+      "name": "bi_pivot_broadciel_am",
+      "type": "bi_pivot",
+      "enabled": true,
+      "account_id": "broadciel-am",
+      "auth": {
+        "username": "nikaijie@algorix.co",
+        "password": "Aa123456",
+        "username_env": "BI_PIVOT_USERNAME",
+        "password_env": "BI_PIVOT_PASSWORD",
+        "session_cookie_env": "BI_PIVOT_SESSION_COOKIE",
+        "session_cookie": "",
+        "x_srf_env": "BI_PIVOT_X_SRF",
+        "x_srf": "",
+        "auto_login": true
+      },
+      "portal": {
+        "base_url": "http://bi.rixbeedesk.com",
+        "path": "/pivot/i/d9ef10c9555bf13893/%E3%80%90Broadciel%E3%80%91%E8%B6%85%E7%AE%A1-%E6%8A%95%E6%94%BE%E5%A0%B1%E8%A1%A8-AM",
+        "referer": "http://bi.rixbeedesk.com/pivot/i/d9ef10c9555bf13893/%E3%80%90Broadciel%E3%80%91%E8%B6%85%E7%AE%A1-%E6%8A%95%E6%94%BE%E5%A0%B1%E8%A1%A8-AM",
+        "view_name": "7b07",
+        "view_title": "【Broadciel】超管-投放報表-AM",
+        "data_cube": "7b07",
+        "timezone": "Asia/Shanghai",
+        "im_version": "2023.01.0",
+        "max_rows": 5000,
+        "max_dimensions": 3,
+        "primary_measure": "SUMtadv-00e",
+        "sort_measure": "SUMtadv-00e",
+        "exclude_dimension": "tagent_-4ae",
+        "exclude_values": [
+          "0"
+        ],
+        "dimension_ids": [
+          "tuser_i-387",
+          "tcpg_id-174",
+          "tcr_id-94f"
+        ]
+      }
+    }
+  ]
+}

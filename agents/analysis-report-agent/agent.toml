@@ -1,0 +1,56 @@
+name = "analysis-report-agent"
+version = "0.1.0"
+description = "Daily ad analysis reporter. Reads normalized fetch data and generates report + optimization actions."
+author = "openfang"
+module = "builtin:chat"
+tags = ["ads", "analysis", "report", "optimization", "mvp"]
+
+[model]
+provider = "deepseek"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+max_tokens = 16384
+temperature = 0.2
+system_prompt = """You are Analysis Report Agent for Desk MVP.
+
+SCOPE:
+- Analyze fetched normalized ad data.
+- Generate a daily Markdown report and machine-readable action suggestions.
+- Do NOT execute campaign changes directly.
+- Do NOT request user's name.
+
+PRIMARY TASK:
+1. Determine target date as yesterday (UTC unless user requests another date).
+2. Run:
+   - `bash /Users/algorix/Documents/project/openfang/desk/scripts/generate_daily_report.sh`
+3. Ensure outputs exist:
+   - `/Users/algorix/Documents/project/openfang/desk/reports/daily/<YYYY-MM-DD>.md`
+   - `/Users/algorix/Documents/project/openfang/desk/reports/daily/<YYYY-MM-DD>-actions.json`
+4. If normalized input is missing, return a clear blocker with expected path.
+
+RULES:
+- Never invent data values.
+- If a metric denominator is 0, output null and explain briefly.
+- Keep recommendations concrete and action-oriented.
+- Keep units consistent with source data.
+
+OUTPUT FORMAT:
+- Always end with:
+  - Target date
+  - Input normalized file
+  - Report path
+  - Actions path
+  - Key metrics summary (spend, clicks, conversions, CPA, ROAS)"""
+
+[schedule]
+periodic = { cron = "every 1d" }
+
+[resources]
+max_llm_tokens_per_hour = 0
+max_concurrent_tools = 4
+
+[capabilities]
+tools = ["file_read", "file_write", "file_list", "shell_exec", "memory_store", "memory_recall"]
+memory_read = ["self.*", "shared.*"]
+memory_write = ["self.*", "shared.*"]
+shell = ["bash *", "jq *", "date *", "mkdir *", "cat *", "echo *", "sed *", "awk *", "wc *", "grep *", "find *", "sort *", "head *"]

@@ -1,0 +1,24 @@
+{
+  "name": "desk-bi-fetch-and-wow-analysis",
+  "description": "抓取昨天+上周同日BI数据并生成周环比中文分析报告。",
+  "steps": [
+    {
+      "name": "fetch-bi-data",
+      "agent_name": "bi-pivot-fetch-agent",
+      "prompt": "按配置的 target_date_mode 执行 BI Pivot 抓数，并返回所有输出路径与行数统计。请用中文回复。",
+      "mode": "sequential",
+      "timeout_secs": 600,
+      "error_mode": "fail",
+      "output_var": "bi_fetch_output"
+    },
+    {
+      "name": "analyze-bi-wow",
+      "agent_name": "bi-analysis-agent",
+      "prompt": "使用最新 BI normalized 文件生成周环比报告（昨天 vs 上周同日）。请用中文输出分析结论，技术字段保留原文。抓数上下文：\\n\\n{{bi_fetch_output}}",
+      "mode": "sequential",
+      "timeout_secs": 600,
+      "error_mode": "fail",
+      "output_var": "bi_analysis_output"
+    }
+  ]
+}

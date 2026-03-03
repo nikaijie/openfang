@@ -78,6 +78,9 @@ Typical tasks:
 3. `creative-ops-agent` generates creative actions.
 4. `campaign-ops-agent` generates campaign actions.
 
+Current workflow definition file:
+- `/Users/algorix/Documents/project/openfang/desk/workflows/data-fetch-and-analysis.json`
+
 ## Safety Rules
 - Agents can suggest actions but must not directly modify live campaign settings in MVP.
 - If data is missing, produce a blocker report instead of guessing.
@@ -90,6 +93,6 @@ Typical tasks:
 
 ## Current Status
 - `data-fetch-agent`: completed and runnable
-- `analysis-report-agent`: pending
+- `analysis-report-agent`: completed and runnable
 - `creative-ops-agent`: pending
 - `campaign-ops-agent`: pending
