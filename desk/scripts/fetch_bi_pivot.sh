@@ -83,10 +83,12 @@ select_dimension_ids() {
   local data_cube_doc_json="$1"
   local configured_dimensions_json="$2"
   local max_dimensions="$3"
+  local selection_mode="${4:-hybrid}"
 
   DATA_CUBE_DOC_JSON="${data_cube_doc_json}" \
   CONFIG_DIMENSIONS_JSON="${configured_dimensions_json}" \
   MAX_DIMENSIONS="${max_dimensions}" \
+  DIMENSION_SELECTION_MODE="${selection_mode}" \
   python3 - <<'PY'
 import json
 import os
@@ -167,6 +169,8 @@ configured_dims = parse_json_env("CONFIG_DIMENSIONS_JSON", [])
 dimensions = data_cube_doc.get("dimensions") or []
 valid_names = [d.get("name") for d in dimensions if d.get("name")]
 valid_name_set = set(valid_names)
+selection_mode = (os.environ.get("DIMENSION_SELECTION_MODE", "hybrid") or "").strip().lower()
+strict_configured = selection_mode in {"strict_configured", "tier_strict", "configured_only"}
 
 try:
     max_dimensions = int(os.environ.get("MAX_DIMENSIONS", "3"))
@@ -182,19 +186,21 @@ for dim_id in configured_dims:
     add_unique(selected, resolve_configured_dimension(dim_id, dimensions, valid_name_set))
 
 # 2) Ensure key business grains exist (account / campaign / creative).
-for dim_id in [
-    pick_dimension_id(dimensions, "user_id", "tuser_i-"),
-    pick_dimension_id(dimensions, "cpg_id", "tcpg_id-"),
-    pick_dimension_id(dimensions, "cr_id", "tcr_id-"),
-]:
-    add_unique(selected, dim_id)
+if not strict_configured:
+    for dim_id in [
+        pick_dimension_id(dimensions, "user_id", "tuser_i-"),
+        pick_dimension_id(dimensions, "cpg_id", "tcpg_id-"),
+        pick_dimension_id(dimensions, "cr_id", "tcr_id-"),
+    ]:
+        add_unique(selected, dim_id)
 
 # 3) Add default facet dimensions as soft fallback.
-default_facet_splits = data_cube_doc.get("defaultFacetSplits") or []
-if default_facet_splits and isinstance(default_facet_splits[0], list):
-    for split in default_facet_splits[0]:
-        if isinstance(split, dict):
-            add_unique(selected, split.get("dimension", ""))
+if not strict_configured or not selected:
+    default_facet_splits = data_cube_doc.get("defaultFacetSplits") or []
+    if default_facet_splits and isinstance(default_facet_splits[0], list):
+        for split in default_facet_splits[0]:
+            if isinstance(split, dict):
+                add_unique(selected, split.get("dimension", ""))
 
 # Keep only dimensions that actually exist in current dataCube metadata.
 selected = [dim_id for dim_id in selected if dim_id in valid_name_set]
@@ -205,6 +211,112 @@ if not selected:
 
 selected = selected[:max_dimensions]
 print(json.dumps(selected))
+PY
+}
+
+normalize_dimension_tier() {
+  local tier_raw="$1"
+  local tier_upper
+  tier_upper="$(tr '[:lower:]' '[:upper:]' <<<"${tier_raw}")"
+  case "${tier_upper}" in
+    L0|L1|L2)
+      echo "${tier_upper}"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+parse_drilldown_filters_json() {
+  local raw_filters="$1"
+
+  DRILLDOWN_FILTERS_RAW="${raw_filters}" python3 - <<'PY'
+import json
+import os
+import sys
+
+raw = os.environ.get("DRILLDOWN_FILTERS_RAW", "").strip()
+if not raw:
+    print("[]")
+    raise SystemExit(0)
+
+try:
+    parsed = json.loads(raw)
+except Exception:
+    raise SystemExit(1)
+
+
+def normalize_values(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        vals = value
+    else:
+        vals = [value]
+    return [str(v) for v in vals if str(v) != ""]
+
+
+def build_clause(dimension, values, action="overlap", exclude=False, mv_filter_only=False):
+    vals = normalize_values(values)
+    if not dimension or not vals:
+        return None
+    clause = {
+        "dimension": str(dimension),
+        "action": action or "overlap",
+        "values": {
+            "setType": "STRING",
+            "elements": vals,
+        },
+    }
+    if exclude:
+        clause["exclude"] = True
+    if mv_filter_only:
+        clause["mvFilterOnly"] = True
+    return clause
+
+
+clauses = []
+
+if isinstance(parsed, dict):
+    for dim, values in parsed.items():
+        clause = build_clause(dim, values)
+        if clause:
+            clauses.append(clause)
+elif isinstance(parsed, list):
+    for entry in parsed:
+        if not isinstance(entry, dict):
+            continue
+        dim = entry.get("dimension")
+        action = entry.get("action", "overlap")
+        exclude = bool(entry.get("exclude", False))
+        mv_filter_only = bool(entry.get("mvFilterOnly", False))
+
+        values = entry.get("values")
+        if isinstance(values, dict) and isinstance(values.get("elements"), list):
+            if dim and values.get("elements"):
+                clause = {
+                    "dimension": str(dim),
+                    "action": action or "overlap",
+                    "values": values,
+                }
+                if exclude:
+                    clause["exclude"] = True
+                if mv_filter_only:
+                    clause["mvFilterOnly"] = True
+                clauses.append(clause)
+            continue
+
+        if "elements" in entry:
+            values = entry.get("elements")
+
+        clause = build_clause(dim, values, action=action, exclude=exclude, mv_filter_only=mv_filter_only)
+        if clause:
+            clauses.append(clause)
+else:
+    raise SystemExit(1)
+
+print(json.dumps(clauses))
 PY
 }
 
@@ -418,12 +530,61 @@ PY
   EXCLUDE_DIMENSION="$(jq -r '.portal.exclude_dimension // empty' <<<"${SOURCE_JSON}")"
   EXCLUDE_VALUES_JSON="$(jq -c '.portal.exclude_values // []' <<<"${SOURCE_JSON}")"
   CONFIG_DIMENSIONS_JSON="$(jq -c '.portal.dimension_ids // (if (.portal.split_dimension // empty) != "" then [ .portal.split_dimension ] else [] end)' <<<"${SOURCE_JSON}")"
+  ANALYSIS_DEFAULT_TIER_RAW="$(jq -r '.analysis.default_tier // .analysis.drilldown.default_tier // empty' <<<"${SOURCE_JSON}")"
+  ANALYSIS_MAX_NEW_DIMS_RAW="$(jq -r '.analysis.drilldown_limits.max_new_dimensions_per_round // empty' <<<"${SOURCE_JSON}")"
 
   if [[ "${MAX_DIMENSIONS_RAW}" =~ ^[0-9]+$ ]] && [[ "${MAX_DIMENSIONS_RAW}" -gt 0 ]]; then
     MAX_DIMENSIONS="${MAX_DIMENSIONS_RAW}"
   else
     MAX_DIMENSIONS=3
   fi
+
+  if [[ -n "${DESK_BI_MAX_DIMENSIONS:-}" ]]; then
+    if [[ "${DESK_BI_MAX_DIMENSIONS}" =~ ^[0-9]+$ ]] && [[ "${DESK_BI_MAX_DIMENSIONS}" -gt 0 ]]; then
+      MAX_DIMENSIONS="${DESK_BI_MAX_DIMENSIONS}"
+    else
+      echo "Warning: DESK_BI_MAX_DIMENSIONS='${DESK_BI_MAX_DIMENSIONS}' is invalid, ignore." >&2
+    fi
+  fi
+
+  REQUESTED_DIMENSION_TIER="$(normalize_dimension_tier "${DESK_BI_DIMENSION_TIER:-}")"
+  if [[ -z "${REQUESTED_DIMENSION_TIER}" ]]; then
+    REQUESTED_DIMENSION_TIER="$(normalize_dimension_tier "${ANALYSIS_DEFAULT_TIER_RAW}")"
+  fi
+  if [[ -z "${REQUESTED_DIMENSION_TIER}" ]]; then
+    HAS_L0_TIERS="$(jq -r '.analysis.dimension_tiers.L0 | length > 0' <<<"${SOURCE_JSON}")"
+    if [[ "${HAS_L0_TIERS}" == "true" ]]; then
+      REQUESTED_DIMENSION_TIER="L0"
+    fi
+  fi
+
+  DIMENSION_SELECTION_MODE="hybrid"
+  DIMENSION_SOURCE_LABEL="portal.dimension_ids+auto"
+  if [[ -n "${REQUESTED_DIMENSION_TIER}" ]]; then
+    TIER_DIMENSIONS_JSON="$(jq -c --arg tier "${REQUESTED_DIMENSION_TIER}" '.analysis.dimension_tiers[$tier] // []' <<<"${SOURCE_JSON}")"
+    if [[ "$(jq 'length' <<<"${TIER_DIMENSIONS_JSON}")" -gt 0 ]]; then
+      CONFIG_DIMENSIONS_JSON="${TIER_DIMENSIONS_JSON}"
+      DIMENSION_SELECTION_MODE="strict_configured"
+      DIMENSION_SOURCE_LABEL="analysis.dimension_tiers.${REQUESTED_DIMENSION_TIER}"
+    else
+      echo "Warning: source '${SOURCE_NAME}' requested tier '${REQUESTED_DIMENSION_TIER}' but no dimensions configured; fallback to portal.dimension_ids." >&2
+      DIMENSION_SOURCE_LABEL="portal.dimension_ids+auto(fallback:${REQUESTED_DIMENSION_TIER})"
+      REQUESTED_DIMENSION_TIER=""
+    fi
+  fi
+
+  if [[ -n "${REQUESTED_DIMENSION_TIER}" && "${REQUESTED_DIMENSION_TIER}" != "L0" ]]; then
+    if [[ "${ANALYSIS_MAX_NEW_DIMS_RAW}" =~ ^[0-9]+$ ]] && [[ "${ANALYSIS_MAX_NEW_DIMS_RAW}" -gt 0 ]]; then
+      MAX_DIMENSIONS="${ANALYSIS_MAX_NEW_DIMS_RAW}"
+    fi
+  fi
+
+  DRILLDOWN_FILTERS_RAW="${DESK_BI_DRILLDOWN_FILTERS_JSON:-}"
+  if ! DRILLDOWN_FILTERS_JSON="$(parse_drilldown_filters_json "${DRILLDOWN_FILTERS_RAW}")"; then
+    echo "Warning: invalid DESK_BI_DRILLDOWN_FILTERS_JSON for source '${SOURCE_NAME}', ignore drilldown filters." >&2
+    DRILLDOWN_FILTERS_JSON='[]'
+  fi
+  DRILLDOWN_FILTER_COUNT="$(jq 'length' <<<"${DRILLDOWN_FILTERS_JSON}")"
 
   refresh_auth() {
     local login_html login_xsrf login_payload login_response_file login_status home_html
@@ -561,7 +722,8 @@ PY
     --arg start "${START_UTC}" \
     --arg end "${END_UTC}" \
     --arg exclude_dimension "${EXCLUDE_DIMENSION}" \
-    --argjson exclude_values "${EXCLUDE_VALUES_JSON}" '
+    --argjson exclude_values "${EXCLUDE_VALUES_JSON}" \
+    --argjson drilldown_clauses "${DRILLDOWN_FILTERS_JSON}" '
       [
         {
           dimension: "__time",
@@ -590,6 +752,8 @@ PY
        ]
        else []
        end)
+      +
+      $drilldown_clauses
     ')"
 
   if ! post_json_with_retry "/app-settings/load" "" "${APP_SETTINGS_FILE}"; then
@@ -609,7 +773,7 @@ PY
     continue
   fi
 
-  DIMENSIONS_JSON="$(select_dimension_ids "${DATA_CUBE_DOC}" "${CONFIG_DIMENSIONS_JSON}" "${MAX_DIMENSIONS}")"
+  DIMENSIONS_JSON="$(select_dimension_ids "${DATA_CUBE_DOC}" "${CONFIG_DIMENSIONS_JSON}" "${MAX_DIMENSIONS}" "${DIMENSION_SELECTION_MODE}")"
 
   if [[ "$(jq 'length' <<<"${DIMENSIONS_JSON}")" -eq 0 ]]; then
     echo "Source '${SOURCE_NAME}' has no configured dimensions to fetch." >&2
@@ -683,6 +847,7 @@ PY
     DIMENSIONS+=("${dimension_id}")
   done < <(jq -r '.[]' <<<"${DIMENSIONS_JSON}")
   echo "Source '${SOURCE_NAME}' selected dimensions: ${DIMENSIONS[*]:-none}" >&2
+  echo "Source '${SOURCE_NAME}' dimension selection: tier=${REQUESTED_DIMENSION_TIER:-none}, mode=${DIMENSION_SELECTION_MODE}, source=${DIMENSION_SOURCE_LABEL}, drilldown_filters=${DRILLDOWN_FILTER_COUNT}" >&2
   declare -a DIM_SUCCEEDED=()
   declare -a DIM_FAILED=()
 
@@ -857,6 +1022,11 @@ PY
     echo "- primary_measure_resolved: ${PRIMARY_MEASURE} (${PRIMARY_MEASURE_TITLE})"
     echo "- sort_measure_configured: ${SORT_MEASURE_CFG:-none}"
     echo "- sort_measure_resolved: ${SORT_MEASURE} (${SORT_MEASURE_TITLE})"
+    echo "- dimension_tier: ${REQUESTED_DIMENSION_TIER:-none}"
+    echo "- dimension_selection_mode: ${DIMENSION_SELECTION_MODE}"
+    echo "- dimension_config_source: ${DIMENSION_SOURCE_LABEL}"
+    echo "- drilldown_filter_count: ${DRILLDOWN_FILTER_COUNT}"
+    echo "- drilldown_filters: $(jq -c . <<<"${DRILLDOWN_FILTERS_JSON}")"
     echo "- dimensions_selected: ${DIMENSIONS[*]:-none}"
     echo "- dimensions_succeeded: ${DIM_SUCCEEDED[*]:-none}"
     echo "- dimensions_failed: ${DIM_FAILED[*]:-none}"

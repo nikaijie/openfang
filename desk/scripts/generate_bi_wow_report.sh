@@ -99,14 +99,57 @@ for source_name in ${TARGET_SOURCES}; do
     continue
   fi
 
-  COMPARE_DIMENSION="$(jq -r --arg source "${source_name}" '.sources[] | select(.name == $source) | .portal.compare_dimension // .portal.dimension_ids[0] // empty' "${CONFIG_FILE}" | head -n1)"
-  CAMPAIGN_DIMENSION="$(jq -r --arg source "${source_name}" '.sources[] | select(.name == $source) | .portal.campaign_dimension // .portal.dimension_ids[1] // empty' "${CONFIG_FILE}" | head -n1)"
+  SOURCE_CONFIG_JSON="$(jq -c --arg source "${source_name}" '.sources[] | select(.name == $source)' "${CONFIG_FILE}" | head -n1)"
+  if [[ -z "${SOURCE_CONFIG_JSON}" || "${SOURCE_CONFIG_JSON}" == "null" ]]; then
+    SOURCE_CONFIG_JSON='{}'
+  fi
+  SOURCE_ANALYSIS_JSON="$(jq -c '.analysis // {}' <<<"${SOURCE_CONFIG_JSON}")"
+
+  COMPARE_DIMENSION="$(jq -r '.portal.compare_dimension // .portal.dimension_ids[0] // empty' <<<"${SOURCE_CONFIG_JSON}")"
+  CAMPAIGN_DIMENSION="$(jq -r '.portal.campaign_dimension // .portal.dimension_ids[1] // empty' <<<"${SOURCE_CONFIG_JSON}")"
+
+  TARGET_DIMENSIONS_JSON="$(jq '[.[].dimension_id | select(. != null) | tostring] | unique' "${TARGET_FILE}")"
+  PRIMARY_AVAILABLE_DIMENSION="$(jq -r '
+    [.[].dimension_id | select(. != null) | tostring]
+    | group_by(.)
+    | map({id: .[0], count: length})
+    | sort_by(.count)
+    | reverse
+    | .[0].id // empty
+  ' "${TARGET_FILE}")"
+  SECONDARY_AVAILABLE_DIMENSION="$(jq -r --arg primary "${PRIMARY_AVAILABLE_DIMENSION}" '
+    [.[].dimension_id | select(. != null) | tostring]
+    | group_by(.)
+    | map({id: .[0], count: length})
+    | sort_by(.count)
+    | reverse
+    | map(select(.id != $primary))
+    | .[0].id // empty
+  ' "${TARGET_FILE}")"
 
   if [[ -z "${COMPARE_DIMENSION}" ]]; then
-    COMPARE_DIMENSION="$(jq -r '.[0].dimension_id // empty' "${TARGET_FILE}")"
+    COMPARE_DIMENSION="${PRIMARY_AVAILABLE_DIMENSION}"
+  fi
+  COMPARE_ROWS_PRESENT="$(jq --arg dim "${COMPARE_DIMENSION}" '[.[] | select(.dimension_id == $dim)] | length' "${TARGET_FILE}")"
+  if [[ -z "${COMPARE_DIMENSION}" || "${COMPARE_ROWS_PRESENT}" -eq 0 ]]; then
+    COMPARE_DIMENSION="${PRIMARY_AVAILABLE_DIMENSION}"
+  fi
+
+  if [[ -z "${CAMPAIGN_DIMENSION}" ]]; then
+    CAMPAIGN_DIMENSION="${SECONDARY_AVAILABLE_DIMENSION}"
+  fi
+  CAMPAIGN_ROWS_PRESENT="$(jq --arg dim "${CAMPAIGN_DIMENSION}" '[.[] | select(.dimension_id == $dim)] | length' "${TARGET_FILE}")"
+  if [[ -z "${CAMPAIGN_DIMENSION}" || "${CAMPAIGN_ROWS_PRESENT}" -eq 0 ]]; then
+    CAMPAIGN_DIMENSION="${SECONDARY_AVAILABLE_DIMENSION}"
   fi
   if [[ -z "${CAMPAIGN_DIMENSION}" ]]; then
     CAMPAIGN_DIMENSION="${COMPARE_DIMENSION}"
+  fi
+
+  if [[ -z "${COMPARE_DIMENSION}" ]]; then
+    echo "Warning: source '${source_name}' has no dimension rows in target file ${TARGET_FILE}" >&2
+    MISSING_BASELINE_SOURCES+=("${source_name}")
+    continue
   fi
 
   COMPARE_DIMENSION_TITLE="$(jq -r --arg dim "${COMPARE_DIMENSION}" '[.[] | select(.dimension_id == $dim) | .dimension_title][0] // empty' "${TARGET_FILE}")"
@@ -117,6 +160,40 @@ for source_name in ${TARGET_SOURCES}; do
   if [[ -z "${CAMPAIGN_DIMENSION_TITLE}" ]]; then
     CAMPAIGN_DIMENSION_TITLE="${CAMPAIGN_DIMENSION}"
   fi
+  read -r COMPARE_DIMENSION_TITLE_HUMAN CAMPAIGN_DIMENSION_TITLE_HUMAN < <(COMPARE_DIMENSION="${COMPARE_DIMENSION}" CAMPAIGN_DIMENSION="${CAMPAIGN_DIMENSION}" COMPARE_DIMENSION_TITLE="${COMPARE_DIMENSION_TITLE}" CAMPAIGN_DIMENSION_TITLE="${CAMPAIGN_DIMENSION_TITLE}" python3 - <<'PY'
+import os
+import re
+
+compare_dim = os.environ.get("COMPARE_DIMENSION", "")
+campaign_dim = os.environ.get("CAMPAIGN_DIMENSION", "")
+compare_title = os.environ.get("COMPARE_DIMENSION_TITLE", "")
+campaign_title = os.environ.get("CAMPAIGN_DIMENSION_TITLE", "")
+
+id_to_human = {
+    "tad_cha-7ef": "产品类型",
+    "country": "地理位置",
+    "device_type": "设备类型",
+    "platform": "平台",
+    "tuser_i-387": "广告账户",
+    "tcpg_id-174": "广告活动",
+    "tcr_id-94f": "广告文案",
+    "placement_id": "广告位",
+    "format": "广告位类型",
+    "bundle": "流量来源",
+}
+
+def humanize(dim_id: str, title: str) -> str:
+    if dim_id in id_to_human:
+        return id_to_human[dim_id]
+    base = (title or dim_id or "").strip()
+    base = re.sub(r"\s*ID\s*$", "", base, flags=re.IGNORECASE).strip()
+    base = re.sub(r"（\s*ID\s*）$", "", base, flags=re.IGNORECASE).strip()
+    base = re.sub(r"\(\s*ID\s*\)$", "", base, flags=re.IGNORECASE).strip()
+    return base or dim_id or ""
+
+print(humanize(compare_dim, compare_title), humanize(campaign_dim, campaign_title))
+PY
+)
   METRIC_ID="$(jq -r '.[0].metric_id // "unknown_metric"' "${TARGET_FILE}")"
   METRIC_TITLE="$(jq -r '.[0].metric_title // "value"' "${TARGET_FILE}" | sed 's/[[:space:]]*$//')"
 
@@ -168,31 +245,320 @@ PY
       | .[:5]
     ')"
 
+  COMPARE_BUCKETS_JSON="$(jq -n \
+    --arg dim "${COMPARE_DIMENSION}" \
+    --slurpfile cur "${TARGET_FILE}" \
+    --slurpfile prev "${BASELINE_FILE}" '
+      def values_by_dim($rows; $dimension):
+        reduce ($rows[] | select(.dimension_id == $dimension)) as $r ({};
+          .[(($r.dimension_value // "null") | tostring)] = (($r.value_num // 0) | tonumber? // 0)
+        );
+      (values_by_dim($cur[0]; $dim)) as $current
+      | (values_by_dim($prev[0]; $dim)) as $baseline
+      | (($current | keys_unsorted) + ($baseline | keys_unsorted) | unique) as $keys
+      | [ $keys[] as $k
+          | {
+              dimension_value: $k,
+              current: ($current[$k] // 0),
+              baseline: ($baseline[$k] // 0)
+            }
+          | .delta = (.current - .baseline)
+          | .wow = (if .baseline == 0 then null else (.delta / .baseline) end)
+        ] as $rows
+      | ($rows | map(.delta) | add // 0) as $total_delta
+      | ($total_delta | if . < 0 then -. else . end) as $abs_total_delta
+      | $rows
+      | map(. + {contribution: (if $abs_total_delta == 0 then null else ((.delta | if . < 0 then -. else . end) / $abs_total_delta) end)})
+      | sort_by((.delta | if . < 0 then -. else . end))
+      | reverse
+    ')"
+  COMPARE_BUCKETS_TOP_JSON="$(jq '.[0:5]' <<<"${COMPARE_BUCKETS_JSON}")"
+
+  OVERALL_WOW_ABS="$(jq -r '.anomaly_thresholds.overall_wow_abs // 0.3' <<<"${SOURCE_ANALYSIS_JSON}")"
+  OVERALL_DELTA_ABS="$(jq -r '.anomaly_thresholds.overall_delta_abs // 1000' <<<"${SOURCE_ANALYSIS_JSON}")"
+  OVERALL_BASELINE_MIN="$(jq -r '.anomaly_thresholds.overall_baseline_min // 3000' <<<"${SOURCE_ANALYSIS_JSON}")"
+  BUCKET_CONTRIB_MIN="$(jq -r '.anomaly_thresholds.bucket_contrib_min // 0.4' <<<"${SOURCE_ANALYSIS_JSON}")"
+  BUCKET_WOW_ABS="$(jq -r '.anomaly_thresholds.bucket_wow_abs // 0.6' <<<"${SOURCE_ANALYSIS_JSON}")"
+  BUCKET_DELTA_ABS="$(jq -r '.anomaly_thresholds.bucket_delta_abs // 300' <<<"${SOURCE_ANALYSIS_JSON}")"
+
+  ANOMALY_DECISION_JSON="$(python3 - "${CURRENT_TOTAL}" "${BASELINE_TOTAL}" "${WOW_RATIO}" "${OVERALL_WOW_ABS}" "${OVERALL_DELTA_ABS}" "${OVERALL_BASELINE_MIN}" <<'PY'
+import json
+import sys
+
+current = float(sys.argv[1])
+baseline = float(sys.argv[2])
+wow_raw = sys.argv[3]
+wow_thr = float(sys.argv[4])
+delta_thr = float(sys.argv[5])
+baseline_min = float(sys.argv[6])
+
+delta = current - baseline
+wow = None if wow_raw == "null" else float(wow_raw)
+reasons = []
+
+if abs(delta) < delta_thr:
+    reasons.append(f"abs(delta)={abs(delta):.6f} < threshold={delta_thr:.6f}")
+
+if baseline < baseline_min:
+    reasons.append(f"baseline={baseline:.6f} < threshold={baseline_min:.6f}")
+
+if wow is None:
+    reasons.append("wow is null (baseline equals 0)")
+elif abs(wow) < wow_thr:
+    reasons.append(f"abs(wow)={abs(wow):.6f} < threshold={wow_thr:.6f}")
+
+is_anomaly = abs(delta) >= delta_thr and baseline >= baseline_min and wow is not None and abs(wow) >= wow_thr
+
+if is_anomaly:
+    reasons = [
+        f"abs(delta)={abs(delta):.6f} >= threshold={delta_thr:.6f}",
+        f"baseline={baseline:.6f} >= threshold={baseline_min:.6f}",
+        f"abs(wow)={abs(wow):.6f} >= threshold={wow_thr:.6f}",
+    ]
+
+print(json.dumps({
+    "is_anomaly": is_anomaly,
+    "reasons": reasons,
+    "thresholds": {
+        "overall_wow_abs": wow_thr,
+        "overall_delta_abs": delta_thr,
+        "overall_baseline_min": baseline_min,
+    },
+}))
+PY
+)"
+
+  CURRENT_TIER="$(TARGET_DIMS_JSON="${TARGET_DIMENSIONS_JSON}" SOURCE_ANALYSIS_JSON="${SOURCE_ANALYSIS_JSON}" python3 - <<'PY'
+import json
+import os
+
+target_dims_raw = os.environ.get("TARGET_DIMS_JSON", "[]")
+analysis_raw = os.environ.get("SOURCE_ANALYSIS_JSON", "{}")
+
+try:
+    target_dims = set(json.loads(target_dims_raw))
+except Exception:
+    target_dims = set()
+
+try:
+    analysis = json.loads(analysis_raw)
+except Exception:
+    analysis = {}
+
+tiers = analysis.get("dimension_tiers") or {}
+default_tier = (analysis.get("default_tier") or "").upper()
+rank = {"L0": 0, "L1": 1, "L2": 2}
+
+best_tier = ""
+best_score = -1
+for tier_name, dims in tiers.items():
+    tier = str(tier_name).upper()
+    dim_set = {str(d) for d in (dims or [])}
+    score = len(target_dims & dim_set)
+    if score > best_score or (score == best_score and rank.get(tier, 99) < rank.get(best_tier, 99)):
+        best_tier = tier
+        best_score = score
+
+if best_score > 0:
+    print(best_tier)
+elif default_tier in ("L0", "L1", "L2"):
+    print(default_tier)
+else:
+    print("none")
+PY
+)"
+
+  L1_TIER_SIZE="$(jq -r '.dimension_tiers.L1 // [] | length' <<<"${SOURCE_ANALYSIS_JSON}")"
+  L2_TIER_SIZE="$(jq -r '.dimension_tiers.L2 // [] | length' <<<"${SOURCE_ANALYSIS_JSON}")"
+  ANOMALY_FLAG="$(jq -r '.is_anomaly' <<<"${ANOMALY_DECISION_JSON}")"
+  NEXT_TIER=""
+  if [[ "${ANOMALY_FLAG}" == "true" ]]; then
+    case "${CURRENT_TIER}" in
+      L0)
+        if [[ "${L1_TIER_SIZE}" -gt 0 ]]; then
+          NEXT_TIER="L1"
+        fi
+        ;;
+      L1)
+        if [[ "${L2_TIER_SIZE}" -gt 0 ]]; then
+          NEXT_TIER="L2"
+        fi
+        ;;
+      L2)
+        NEXT_TIER=""
+        ;;
+      *)
+        if [[ "${L1_TIER_SIZE}" -gt 0 ]]; then
+          NEXT_TIER="L1"
+        elif [[ "${L2_TIER_SIZE}" -gt 0 ]]; then
+          NEXT_TIER="L2"
+        fi
+        ;;
+    esac
+  fi
+
+  DRILLDOWN_BUCKET_VALUES_JSON="$(COMPARE_BUCKETS_JSON="${COMPARE_BUCKETS_JSON}" python3 - "${BUCKET_CONTRIB_MIN}" "${BUCKET_WOW_ABS}" "${BUCKET_DELTA_ABS}" <<'PY'
+import json
+import os
+import sys
+
+bucket_contrib_min = float(sys.argv[1])
+bucket_wow_abs = float(sys.argv[2])
+bucket_delta_abs = float(sys.argv[3])
+
+try:
+    rows = json.loads(os.environ.get("COMPARE_BUCKETS_JSON", "[]"))
+except Exception:
+    rows = []
+
+selected = []
+for row in rows:
+    value = str(row.get("dimension_value", ""))
+    if not value or value == "null":
+        continue
+    delta = abs(float(row.get("delta", 0) or 0))
+    wow_val = row.get("wow")
+    wow_abs = abs(float(wow_val)) if wow_val is not None else None
+    contrib = row.get("contribution")
+    contrib_val = abs(float(contrib)) if contrib is not None else 0.0
+
+    if contrib_val >= bucket_contrib_min or (wow_abs is not None and wow_abs >= bucket_wow_abs and delta >= bucket_delta_abs):
+        if value not in selected:
+            selected.append(value)
+    if len(selected) >= 3:
+        break
+
+print(json.dumps(selected))
+PY
+)"
+
+  DRILLDOWN_BUCKET_REASONS_JSON="$(COMPARE_BUCKETS_JSON="${COMPARE_BUCKETS_JSON}" DRILLDOWN_BUCKET_VALUES_JSON="${DRILLDOWN_BUCKET_VALUES_JSON}" python3 - "${BUCKET_CONTRIB_MIN}" "${BUCKET_WOW_ABS}" "${BUCKET_DELTA_ABS}" <<'PY'
+import json
+import os
+import sys
+
+bucket_contrib_min = float(sys.argv[1])
+bucket_wow_abs = float(sys.argv[2])
+bucket_delta_abs = float(sys.argv[3])
+
+try:
+    rows = json.loads(os.environ.get("COMPARE_BUCKETS_JSON", "[]"))
+except Exception:
+    rows = []
+
+try:
+    selected_values = json.loads(os.environ.get("DRILLDOWN_BUCKET_VALUES_JSON", "[]"))
+except Exception:
+    selected_values = []
+
+row_map = {}
+for row in rows:
+    value = str(row.get("dimension_value", ""))
+    if value and value != "null":
+        row_map[value] = row
+
+result = []
+for value in selected_values:
+    key = str(value)
+    row = row_map.get(key, {})
+    current = float(row.get("current", 0) or 0)
+    baseline = float(row.get("baseline", 0) or 0)
+    delta = float(row.get("delta", 0) or 0)
+    wow_val = row.get("wow")
+    wow_num = float(wow_val) if wow_val is not None else None
+    contribution = row.get("contribution")
+    contribution_num = float(contribution) if contribution is not None else None
+
+    delta_abs = abs(delta)
+    wow_abs = abs(wow_num) if wow_num is not None else None
+    contribution_abs = abs(contribution_num) if contribution_num is not None else 0.0
+
+    reasons = []
+    if contribution_abs >= bucket_contrib_min:
+        reasons.append(
+            f"bucket_contribution={contribution_abs:.6f} >= threshold={bucket_contrib_min:.6f}"
+        )
+    if wow_abs is not None and wow_abs >= bucket_wow_abs and delta_abs >= bucket_delta_abs:
+        reasons.append(
+            f"abs(bucket_wow)={wow_abs:.6f} >= threshold={bucket_wow_abs:.6f} and abs(bucket_delta)={delta_abs:.6f} >= threshold={bucket_delta_abs:.6f}"
+        )
+    if not reasons:
+        reasons.append("selected_by_ranked_bucket_rule")
+
+    result.append(
+        {
+            "value": key,
+            "current": current,
+            "baseline": baseline,
+            "delta": delta,
+            "wow": wow_num,
+            "contribution": contribution_num,
+            "reasons": reasons,
+        }
+    )
+
+print(json.dumps(result))
+PY
+)"
+
+  DRILLDOWN_REQUIRED="false"
+  DRILLDOWN_FILTERS_JSON='{}'
+  DRILLDOWN_STOP_REASON="anomaly_not_triggered"
+  if [[ "${ANOMALY_FLAG}" == "true" && -n "${NEXT_TIER}" ]]; then
+    DRILLDOWN_REQUIRED="true"
+    DRILLDOWN_STOP_REASON=""
+    if [[ "$(jq 'length' <<<"${DRILLDOWN_BUCKET_VALUES_JSON}")" -gt 0 ]]; then
+      DRILLDOWN_FILTERS_JSON="$(jq -n --arg dim "${COMPARE_DIMENSION}" --argjson values "${DRILLDOWN_BUCKET_VALUES_JSON}" '{($dim): $values}')"
+    fi
+  else
+    if [[ "${ANOMALY_FLAG}" == "true" && "${CURRENT_TIER}" == "L2" ]]; then
+      DRILLDOWN_STOP_REASON="max_tier_reached"
+    fi
+    DRILLDOWN_BUCKET_VALUES_JSON='[]'
+    DRILLDOWN_BUCKET_REASONS_JSON='[]'
+  fi
+
   jq -n \
     --arg source "${source_name}" \
     --arg metric_id "${METRIC_ID}" \
     --arg metric_title "${METRIC_TITLE}" \
     --arg compare_dimension "${COMPARE_DIMENSION}" \
     --arg compare_dimension_title "${COMPARE_DIMENSION_TITLE}" \
+    --arg compare_dimension_title_human "${COMPARE_DIMENSION_TITLE_HUMAN}" \
     --arg campaign_dimension "${CAMPAIGN_DIMENSION}" \
     --arg campaign_dimension_title "${CAMPAIGN_DIMENSION_TITLE}" \
+    --arg campaign_dimension_title_human "${CAMPAIGN_DIMENSION_TITLE_HUMAN}" \
     --arg target_file "${TARGET_FILE}" \
     --arg baseline_file "${BASELINE_FILE}" \
+    --arg current_tier "${CURRENT_TIER}" \
+    --arg recommended_next_tier "${NEXT_TIER}" \
     --argjson current_total "${CURRENT_TOTAL}" \
     --argjson baseline_total "${BASELINE_TOTAL}" \
     --argjson delta "${DELTA}" \
     --argjson wow "${WOW_RATIO}" \
     --argjson current_rows "${CURRENT_ROWS}" \
     --argjson baseline_rows "${BASELINE_ROWS}" \
-    --argjson top_movers "${TOP_MOVERS_JSON}" '
+    --argjson top_movers "${TOP_MOVERS_JSON}" \
+    --argjson compare_buckets_top "${COMPARE_BUCKETS_TOP_JSON}" \
+    --argjson anomaly "${ANOMALY_DECISION_JSON}" \
+    --argjson drilldown_required "${DRILLDOWN_REQUIRED}" \
+    --argjson drilldown_filters "${DRILLDOWN_FILTERS_JSON}" \
+    --argjson drilldown_bucket_values "${DRILLDOWN_BUCKET_VALUES_JSON}" \
+    --argjson drilldown_bucket_reasons "${DRILLDOWN_BUCKET_REASONS_JSON}" \
+    --arg drilldown_stop_reason "${DRILLDOWN_STOP_REASON}" \
+    --argjson bucket_thresholds "$(jq -n --argjson contrib "${BUCKET_CONTRIB_MIN}" --argjson wow_abs "${BUCKET_WOW_ABS}" --argjson delta_abs "${BUCKET_DELTA_ABS}" '{bucket_contrib_min: $contrib, bucket_wow_abs: $wow_abs, bucket_delta_abs: $delta_abs}')" '
     {
       source: $source,
       metric_id: $metric_id,
       metric_title: $metric_title,
       compare_dimension: $compare_dimension,
       compare_dimension_title: $compare_dimension_title,
+      compare_dimension_title_human: $compare_dimension_title_human,
       campaign_dimension: $campaign_dimension,
       campaign_dimension_title: $campaign_dimension_title,
+      campaign_dimension_title_human: $campaign_dimension_title_human,
+      current_tier: $current_tier,
+      recommended_next_tier: $recommended_next_tier,
       current_total: $current_total,
       baseline_total: $baseline_total,
       delta: $delta,
@@ -201,7 +567,18 @@ PY
       baseline_rows: $baseline_rows,
       target_file: $target_file,
       baseline_file: $baseline_file,
-      top_movers: $top_movers
+      top_movers: $top_movers,
+      compare_buckets_top: $compare_buckets_top,
+      anomaly: ($anomaly + {bucket_thresholds: $bucket_thresholds}),
+      drilldown: {
+        required: $drilldown_required,
+        next_tier: $recommended_next_tier,
+        filters: $drilldown_filters,
+        bucket_values: $drilldown_bucket_values,
+        bucket_reasons: $drilldown_bucket_reasons,
+        stop_reason: $drilldown_stop_reason,
+        reasons: $anomaly.reasons
+      }
     }' >> "${SOURCE_SUMMARY_NDJSON}"
 
   SOURCES_ANALYZED+=("${source_name}")
@@ -242,6 +619,27 @@ else:
 PY
 )"
 
+DRILLDOWN_REQUIRED="$(jq -r '[.[].drilldown.required] | any' <<<"${SOURCE_SUMMARIES_JSON}")"
+DRILLDOWN_REQUESTS_JSON="$(jq -c --arg target_date "${TARGET_DATE}" '
+  [
+    .[]
+    | select(.drilldown.required == true)
+    | {
+        source: .source,
+        target_date: $target_date,
+        current_tier: .current_tier,
+        next_tier: .drilldown.next_tier,
+        filters: .drilldown.filters,
+        bucket_values: .drilldown.bucket_values,
+        bucket_reasons: .drilldown.bucket_reasons,
+        reasons: .drilldown.reasons,
+        compare_dimension: .compare_dimension,
+        compare_dimension_title: .compare_dimension_title,
+        compare_dimension_title_human: .compare_dimension_title_human
+      }
+  ]
+' <<<"${SOURCE_SUMMARIES_JSON}")"
+
 REPORT_JSON="${REPORT_BASE}/${TARGET_DATE}-vs-${BASELINE_DATE}.json"
 REPORT_MD="${REPORT_BASE}/${TARGET_DATE}-vs-${BASELINE_DATE}.md"
 GENERATED_AT="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -261,7 +659,11 @@ jq -n \
     '{current: $current, baseline: $baseline, delta: $delta, wow: $wow}')" \
   --argjson sources "${SOURCE_SUMMARIES_JSON}" \
   --argjson analyzed_sources "${SOURCES_ANALYZED_JSON}" \
-  --argjson missing_baseline_sources "${MISSING_BASELINE_JSON}" '
+  --argjson missing_baseline_sources "${MISSING_BASELINE_JSON}" \
+  --argjson drilldown "$(jq -n \
+    --argjson required "${DRILLDOWN_REQUIRED}" \
+    --argjson requests "${DRILLDOWN_REQUESTS_JSON}" \
+    '{required: $required, requests: $requests}')" '
   {
     target_date: $target_date,
     baseline_date: $baseline_date,
@@ -274,7 +676,8 @@ jq -n \
     totals: $totals,
     sources: $sources,
     analyzed_sources: $analyzed_sources,
-    missing_baseline_sources: $missing_baseline_sources
+    missing_baseline_sources: $missing_baseline_sources,
+    drilldown: $drilldown
   }' > "${REPORT_JSON}"
 
 {
@@ -301,15 +704,26 @@ jq -n \
   echo
   jq -r '
     .sources[]
-    | "- \(.source): 指标=\(.metric_title), 当前=\(.current_total), 基准=\(.baseline_total), 变化量=\(.delta), 周环比=\(.wow), 对比维度=\(.compare_dimension_title)"
+    | "- \(.source): 指标=\(.metric_title), 当前=\(.current_total), 基准=\(.baseline_total), 变化量=\(.delta), 周环比=\(.wow), 对比维度=\(.compare_dimension_title_human), 当前层级=\(.current_tier), 异常触发=\(.anomaly.is_anomaly)"
   ' "${REPORT_JSON}"
+  echo
+  echo "## 异常下钻建议"
+  echo
+  if [[ "$(jq -r '.drilldown.required' "${REPORT_JSON}")" == "true" ]]; then
+    jq -r '
+      .drilldown.requests[]
+      | "- \(.source): 当前层=\(.current_tier), 建议下钻层=\(.next_tier), 过滤条件=\(.filters | @json), 触发原因=\(.reasons | join(" | "))"
+    ' "${REPORT_JSON}"
+  else
+    echo "- 无（本次未触发下钻）"
+  fi
   echo
   echo "## 主要变动项（按活动维度）"
   echo
   jq -r '
     .sources[]
     | . as $source
-    | "### \($source.source) (\($source.campaign_dimension_title))\n"
+    | "### \($source.source) (\($source.campaign_dimension_title_human))\n"
       + (
           if ($source.top_movers | length) == 0
           then "- 无"
@@ -332,4 +746,8 @@ else
 fi
 echo "报告路径: ${REPORT_MD}"
 echo "JSON路径: ${REPORT_JSON}"
+echo "是否触发下钻: ${DRILLDOWN_REQUIRED}"
+echo "下钻请求数: $(jq 'length' <<<"${DRILLDOWN_REQUESTS_JSON}")"
+echo "DRILLDOWN_REQUIRED: ${DRILLDOWN_REQUIRED}"
+echo "DRILLDOWN_REQUESTS_JSON: ${DRILLDOWN_REQUESTS_JSON}"
 echo "关键指标摘要: current_spend=${TOTAL_CURRENT}, baseline_spend=${TOTAL_BASELINE}, wow=${TOTAL_WOW}"

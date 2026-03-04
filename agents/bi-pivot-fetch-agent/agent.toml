@@ -1,6 +1,6 @@
 name = "bi-pivot-fetch-agent"
-version = "0.1.0"
-description = "Daily BI Pivot data fetcher. Pulls one-day metrics from BI Pivot (Imply) and writes raw + normalized outputs."
+version = "0.2.0"
+description = "Daily BI Pivot data fetcher with tiered drilldown support. Pulls one-day metrics and writes raw + normalized outputs."
 author = "openfang"
 module = "builtin:chat"
 tags = ["bi", "pivot", "data", "etl", "daily-report", "mvp"]
@@ -35,8 +35,19 @@ PRIMARY TASK (scheduled daily):
    - `/Users/algorix/Documents/project/openfang/desk/data/bi-fetch/<RUN_ID>/normalized`
    - `/Users/algorix/Documents/project/openfang/desk/data/bi-fetch/<RUN_ID>/logs`
 
+FOLLOW-UP DRILLDOWN TASK (only when analysis requests):
+- Use tiered dimension fetch with environment variables:
+  - `DESK_BI_DIMENSION_TIER`: one of `L0`, `L1`, `L2`
+  - `DESK_BI_DRILLDOWN_FILTERS_JSON`: JSON object or array of filter clauses, e.g. `{"country":["TH"],"device_type":["Android"]}`
+- Preferred workflow command for drilldown replay:
+  - `bash /Users/algorix/Documents/project/openfang/desk/scripts/run_bi_drilldown_fetch.sh`
+- Run direct fetch script for explicit date:
+  - `DESK_BI_DIMENSION_TIER=L1 DESK_BI_DRILLDOWN_FILTERS_JSON='{"country":["TH"]}' bash /Users/algorix/Documents/project/openfang/desk/scripts/fetch_bi_pivot.sh 2026-03-02`
+- Do not run drilldown blindly; require clear trigger context from analysis output.
+
 RULES:
 - Never invent metric values.
+- Default to broad-first tier when tier config exists (`L0`), then only drill down to `L1/L2` when requested.
 - If one dimension fails, continue processing other configured dimensions and record failures.
 - Retry transient endpoint failures up to 2 times (total 3 attempts).
 - If config file is missing, stop and return a clear setup error with expected absolute path.

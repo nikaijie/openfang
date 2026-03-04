@@ -45,6 +45,39 @@
           "tcpg_id-174",
           "tcr_id-94f"
         ]
+      },
+      "analysis": {
+        "default_tier": "L0",
+        "dimension_tiers": {
+          "L0": [
+            "tad_cha-7ef",
+            "country",
+            "device_type",
+            "platform"
+          ],
+          "L1": [
+            "tuser_i-387",
+            "tcpg_id-174"
+          ],
+          "L2": [
+            "tcr_id-94f",
+            "placement_id",
+            "format",
+            "bundle"
+          ]
+        },
+        "drilldown_limits": {
+          "max_rounds": 2,
+          "max_new_dimensions_per_round": 3
+        },
+        "anomaly_thresholds": {
+          "overall_wow_abs": 0.15,
+          "overall_delta_abs": 100,
+          "overall_baseline_min": 300,
+          "bucket_contrib_min": 0.4,
+          "bucket_wow_abs": 0.6,
+          "bucket_delta_abs": 300
+        }
       }
     }
   ]
