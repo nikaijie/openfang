@@ -244,6 +244,17 @@ PY
       | reverse
       | .[:5]
     ')"
+  TOP_MOVERS_JSON="$(jq '
+    map(
+      . + {
+        dimension_value_display:
+          (if (.dimension_value | type) == "string" and (.dimension_value | length) > 16
+           then ((.dimension_value[0:8]) + "..." + (.dimension_value[(.dimension_value|length)-6:]))
+           else .dimension_value
+           end)
+      }
+    )
+  ' <<<"${TOP_MOVERS_JSON}")"
 
   COMPARE_BUCKETS_JSON="$(jq -n \
     --arg dim "${COMPARE_DIMENSION}" \
@@ -272,6 +283,17 @@ PY
       | sort_by((.delta | if . < 0 then -. else . end))
       | reverse
     ')"
+  COMPARE_BUCKETS_JSON="$(jq '
+    map(
+      . + {
+        dimension_value_display:
+          (if (.dimension_value | type) == "string" and (.dimension_value | length) > 16
+           then ((.dimension_value[0:8]) + "..." + (.dimension_value[(.dimension_value|length)-6:]))
+           else .dimension_value
+           end)
+      }
+    )
+  ' <<<"${COMPARE_BUCKETS_JSON}")"
   COMPARE_BUCKETS_TOP_JSON="$(jq '.[0:5]' <<<"${COMPARE_BUCKETS_JSON}")"
 
   OVERALL_WOW_ABS="$(jq -r '.anomaly_thresholds.overall_wow_abs // 0.3' <<<"${SOURCE_ANALYSIS_JSON}")"
@@ -729,7 +751,7 @@ jq -n \
           then "- 无"
           else
             ($source.top_movers
-              | map("- [\($source.metric_title)] \(.dimension_value): 当前=\(.current), 基准=\(.baseline), 变化量=\(.delta), 周环比=\(.wow)")
+              | map("- [\($source.metric_title)] \(.dimension_value_display // .dimension_value): 当前=\(.current), 基准=\(.baseline), 变化量=\(.delta), 周环比=\(.wow)")
               | join("\n"))
           end
         )
